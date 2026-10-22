@@ -70,9 +70,46 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
+    private var webViewRef: WebView? = null
+
+    private val requestNotificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        android.util.Log.d("SamiApp", "Notification permission granted: $isGranted")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize high-importance notification channels
+        com.sami.tradingchallengetracker.service.SamiFirebaseMessagingService.createNotificationChannels(this)
+
+        // Prompt for Android 13+ Notification Permission if not yet granted
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                requestNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
+        // Fetch and cache current FCM Token
+        try {
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().token
+                .addOnCompleteListener { task ->
+                    if (task.isSuccessful) {
+                        val token = task.result
+                        android.util.Log.d("SamiApp", "Fetched FCM token: $token")
+                        val prefs = getSharedPreferences("sami_app_prefs", Context.MODE_PRIVATE)
+                        prefs.edit().putString("fcm_token", token).apply()
+                    }
+                }
+        } catch (e: Exception) {
+            android.util.Log.w("SamiApp", "Could not fetch FCM token: ${e.message}")
+        }
+
         val hasWeb = hasWebAssets(this)
         setContent {
             TradingChallengeTheme {
@@ -80,6 +117,8 @@ class MainActivity : ComponentActivity() {
                     var forceNative by remember { mutableStateOf(!hasWeb) }
                     if (!forceNative) {
                         FullAppWebView(
+                            currentIntent = intent,
+                            onWebViewCreated = { webViewRef = it },
                             onFallbackToNative = {
                                 android.util.Log.w("SamiApp", "Falling back to native Android interface.")
                                 forceNative = true
@@ -90,6 +129,14 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        webViewRef?.let { webView ->
+            dispatchPendingDeepLink(webView, intent)
         }
     }
 
@@ -106,7 +153,11 @@ class MainActivity : ComponentActivity() {
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun FullAppWebView(onFallbackToNative: () -> Unit = {}) {
+fun FullAppWebView(
+    currentIntent: Intent? = null,
+    onWebViewCreated: (WebView) -> Unit = {},
+    onFallbackToNative: () -> Unit = {}
+) {
     val context = LocalContext.current
     var uploadMessage by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
@@ -151,6 +202,8 @@ fun FullAppWebView(onFallbackToNative: () -> Unit = {}) {
                     }
                     WebView.setWebContentsDebuggingEnabled(true)
 
+                    addJavascriptInterface(SamiNativeBridge(ctx, this), "SamiAndroidBridge")
+
                     val assetLoader = WebViewAssetLoader.Builder()
                         .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(ctx))
                         .build()
@@ -172,6 +225,7 @@ fun FullAppWebView(onFallbackToNative: () -> Unit = {}) {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
                             isLoading = false
+                            view?.let { dispatchPendingDeepLink(it, currentIntent) }
                         }
 
                         override fun onReceivedError(
@@ -213,6 +267,7 @@ fun FullAppWebView(onFallbackToNative: () -> Unit = {}) {
 
                     loadUrl("https://appassets.androidplatform.net/index.html")
                     webViewInstance = this
+                    onWebViewCreated(this)
                 }
             },
             modifier = Modifier.fillMaxSize()
@@ -241,6 +296,84 @@ fun FullAppWebView(onFallbackToNative: () -> Unit = {}) {
                     )
                 }
             }
+        }
+    }
+}
+
+class SamiNativeBridge(private val context: Context, private val webView: WebView?) {
+    @android.webkit.JavascriptInterface
+    fun getFcmToken(): String {
+        return context.getSharedPreferences("sami_app_prefs", Context.MODE_PRIVATE)
+            .getString("fcm_token", "") ?: ""
+    }
+
+    @android.webkit.JavascriptInterface
+    fun onUserLoggedIn(userId: Long, username: String) {
+        val prefs = context.getSharedPreferences("sami_app_prefs", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putLong("logged_user_id", userId)
+            .putString("logged_user_name", username)
+            .apply()
+
+        val token = prefs.getString("fcm_token", "") ?: ""
+        if (token.isNotEmpty()) {
+            val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+            val deviceId = prefs.getString("device_id", null) ?: "android_${System.currentTimeMillis()}"
+            val docId = "token_${userId}_${deviceId}"
+            val payload = hashMapOf(
+                "id" to docId,
+                "token" to token,
+                "userId" to userId,
+                "username" to username,
+                "deviceId" to deviceId,
+                "platform" to "android",
+                "deviceModel" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
+                "updatedAt" to System.currentTimeMillis()
+            )
+            db.collection("user_fcm_tokens").document(docId)
+                .set(payload, com.google.firebase.firestore.SetOptions.merge())
+        }
+    }
+
+    @android.webkit.JavascriptInterface
+    fun onUserLoggedOut() {
+        context.getSharedPreferences("sami_app_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .remove("logged_user_id")
+            .remove("logged_user_name")
+            .apply()
+    }
+
+    @android.webkit.JavascriptInterface
+    fun isNotificationsEnabled(): Boolean {
+        return androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()
+    }
+}
+
+private fun dispatchPendingDeepLink(webView: WebView, intent: Intent?) {
+    if (intent == null) return
+    val channelId = intent.getStringExtra("target_channel_id")
+    val chatType = intent.getStringExtra("target_chat_type")
+    val partnerId = intent.getLongExtra("target_partner_id", -1L)
+    val messageId = intent.getStringExtra("target_message_id")
+
+    if (!channelId.isNullOrEmpty() || partnerId > 0 || !messageId.isNullOrEmpty()) {
+        try {
+            val json = org.json.JSONObject().apply {
+                if (!channelId.isNullOrEmpty()) put("channelId", channelId)
+                if (!chatType.isNullOrEmpty()) put("chatType", chatType)
+                if (partnerId > 0) put("partnerId", partnerId)
+                if (!messageId.isNullOrEmpty()) put("messageId", messageId)
+            }.toString()
+
+            webView.post {
+                webView.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('app_open_chat_message', { detail: $json }));",
+                    null
+                )
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("SamiApp", "Error dispatching deep link: ${e.message}")
         }
     }
 }

@@ -584,7 +584,7 @@ export function subscribeToChannelMessages(
   onMessagesChange: (messages: ChatMessage[]) => void,
   onError?: (errorMsg: string) => void
 ): () => void {
-  const q = query(collection(db, CHAT_COLLECTION), orderBy('timestamp', 'asc'));
+  const q = query(collection(db, CHAT_COLLECTION), where('channelId', '==', channelId));
 
   return onSnapshot(
     q,

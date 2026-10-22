@@ -28,7 +28,12 @@ import {
   Copy,
   ChevronLeft,
   Crown,
+  Search,
+  Award,
+  MessageSquare,
+  TrendingUp,
 } from 'lucide-react';
+import { LocalCacheService } from '../services/localCache';
 import {
   CommunityChannel,
   ChatMessage,
@@ -104,8 +109,15 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
   onUserUpdated,
   onActiveConversationChanged,
 }) => {
-  const [channels, setChannels] = useState<CommunityChannel[]>([]);
-  const [users, setUsers] = useState<UserAccount[]>([]);
+  const [channels, setChannels] = useState<CommunityChannel[]>(() =>
+    LocalCacheService.getChannels(currentUser.id)
+  );
+  const [channelsLoading, setChannelsLoading] = useState<boolean>(() =>
+    LocalCacheService.getChannels(currentUser.id).length === 0
+  );
+  const [users, setUsers] = useState<UserAccount[]>(() =>
+    LocalCacheService.getUsers(currentUser.id)
+  );
   const [selectedChannel, setSelectedChannel] = useState<CommunityChannel | null>(null);
   const [isPrivateChatOpen, setIsPrivateChatOpen] = useState(
     initialMode === 'private_chat' || Boolean(targetPartnerId)
@@ -135,12 +147,15 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
   const [isExecutingAction, setIsExecutingAction] = useState(false);
   const evidenceInputRef = useRef<HTMLInputElement>(null);
 
-  // Messages state
+  // Messages state with local cache pre-fill
   const [channelMessages, setChannelMessages] = useState<ChatMessage[]>([]);
-  const [privateMessages, setPrivateMessages] = useState<PrivateMessage[]>([]);
-  const [subscriptionPlans, setSubscriptionPlans] = useState<SubscriptionPlan[]>(() =>
-    getInitialPlansFromCache()
+  const [privateMessages, setPrivateMessages] = useState<PrivateMessage[]>(() =>
+    LocalCacheService.getPrivateMessages(currentUser.id, targetPartnerId)
   );
+  const [subscriptionPlans, setSubscriptionPlans] = useState<SubscriptionPlan[]>(() => {
+    const cached = LocalCacheService.getSubscriptionPlans(currentUser.id);
+    return cached && cached.length > 0 ? cached : getInitialPlansFromCache();
+  });
   const [viewingSubscriptionPlan, setViewingSubscriptionPlan] = useState<SubscriptionPlan | null>(null);
 
   // Debounced/guarded opening for subscription details
@@ -217,10 +232,12 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
     };
   }, []);
 
-  // Subscribe to Channels and Users
+  // Subscribe to Channels, Users, and Subscription Plans with background cache update
   useEffect(() => {
     const unsubChannels = subscribeToChannels((liveChannels) => {
       setChannels(liveChannels);
+      setChannelsLoading(false);
+      LocalCacheService.setChannels(currentUser.id, liveChannels);
       setSelectedChannel((prev) => {
         if (!prev) return null;
         const updated = liveChannels.find((c) => c.id === prev.id);
@@ -228,10 +245,18 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
         return updated;
       });
     });
-    const unsubUsers = subscribeToCommunityUsers(setUsers);
+    const unsubUsers = subscribeToCommunityUsers((updatedUsers) => {
+      setUsers(updatedUsers);
+      LocalCacheService.setUsers(currentUser.id, updatedUsers);
+    });
+    const unsubPlans = subscribeToSubscriptionPlans((plans) => {
+      setSubscriptionPlans(plans);
+      LocalCacheService.setSubscriptionPlans(currentUser.id, plans);
+    });
     return () => {
       unsubChannels();
       unsubUsers();
+      unsubPlans();
     };
   }, [currentUser.id, currentUser.role]);
 
@@ -256,28 +281,43 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
     }
   }, [selectedChannel, currentVerifiedMap, currentUser.role, currentUser.id]);
 
-  // Subscribe to active channel messages (ONLY after password verification and channel open)
+  // Subscribe to active channel messages (with instant local cache pre-fill)
   useEffect(() => {
     if (!selectedChannel) {
       setChannelMessages([]);
       return;
     }
+    // Instantly load cached messages for this channel
+    const cachedMsgs = LocalCacheService.getChannelMessages(currentUser.id, selectedChannel.id);
+    if (cachedMsgs.length > 0) {
+      setChannelMessages(cachedMsgs);
+    }
     const unsub = subscribeToChannelMessages(
       selectedChannel.id,
-      setChannelMessages,
+      (msgs) => {
+        setChannelMessages(msgs);
+        LocalCacheService.setChannelMessages(currentUser.id, selectedChannel.id, msgs);
+      },
       showBannerError
     );
     return () => unsub();
-  }, [selectedChannel]);
+  }, [selectedChannel, currentUser.id]);
 
-  // Subscribe to permanent private messages
+  // Subscribe to permanent private messages (with instant local cache pre-fill)
   useEffect(() => {
     if (!isPrivateChatOpen) return;
     const participantId =
       currentUser.id === 1 || currentUser.role === 'moderator'
         ? ownerSelectedPmUserId
         : currentUser.id;
-    const unsub = subscribeToPrivateMessages(participantId, setPrivateMessages);
+    const cachedPms = LocalCacheService.getPrivateMessages(currentUser.id, participantId);
+    if (cachedPms.length > 0) {
+      setPrivateMessages(cachedPms);
+    }
+    const unsub = subscribeToPrivateMessages(participantId, (msgs) => {
+      setPrivateMessages(msgs);
+      LocalCacheService.setPrivateMessages(currentUser.id, msgs, participantId);
+    });
     return () => unsub();
   }, [isPrivateChatOpen, currentUser.id, currentUser.role, ownerSelectedPmUserId]);
 
@@ -856,10 +896,10 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
               <span className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-gradient-to-b from-amber-300 to-amber-500 text-slate-950 flex items-center justify-center border-2 border-[#0d1424] shadow-md">
                 {uploadingAvatar ? (
                   <span className="w-2.5 h-2.5 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                ) : isOwnerUser ? (
+                  <Crown className="w-3 h-3 text-slate-950" />
                 ) : (
-                  <span className="material-symbols-filled text-[12px] text-slate-950">
-                    {isOwnerUser ? 'crown' : 'photo_camera'}
-                  </span>
+                  <Camera className="w-3 h-3 text-slate-950" />
                 )}
               </span>
             </button>
@@ -870,9 +910,7 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
                   {currentUser.displayName}
                 </span>
                 {isOwnerUser ? (
-                  <span className="material-symbols-filled text-amber-400 text-[20px] drop-shadow-[0_0_8px_rgba(251,191,36,0.6)]">
-                    crown
-                  </span>
+                  <Crown className="w-5 h-5 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
                 ) : currentUser.role === 'moderator' ? (
                   <span className="text-[10px] font-black text-emerald-300 bg-emerald-500/20 border border-emerald-500/40 px-1.5 py-0.5 rounded-md">
                     🛡️ مشرف
@@ -893,19 +931,30 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
           >
             <span>{currentUser.id === 1 ? 'الرسائل الخاصة' : 'محادثة خاصة'}</span>
             <span className="w-6 h-6 rounded-lg bg-amber-400/20 border border-amber-400/50 flex items-center justify-center text-amber-400">
-              <span className="material-symbols-filled text-[15px]">chat</span>
+              <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
             </span>
           </button>
         </div>
+
+        {/* Offline notification banner if internet is disconnected */}
+        {!isOnline && (
+          <div className="relative z-20 mx-1 p-2.5 rounded-2xl bg-amber-500/15 border border-amber-500/40 text-amber-300 text-xs font-bold flex items-center justify-between shadow-[0_4px_16px_rgba(0,0,0,0.6)]">
+            <div className="flex items-center gap-2">
+              <WifiOff className="w-4 h-4 text-amber-400 shrink-0 animate-pulse" />
+              <span>وضع عدم الاتصال — يتم عرض البيانات المحفوظة محلياً على هاتفك</span>
+            </div>
+            <span className="text-[10px] bg-amber-400/20 px-2 py-0.5 rounded-md border border-amber-400/40 shrink-0">
+              مخزن محلياً
+            </span>
+          </div>
+        )}
 
         {/* Luxury Subscriptions & VIP Channels Showcase Banner */}
         {subscriptionPlans.length > 0 && (
           <div className="relative z-10 p-4 rounded-3xl bg-gradient-to-r from-amber-500/15 via-[#0e172a] to-amber-500/10 border border-amber-500/35 shadow-[0_10px_30px_rgba(0,0,0,0.6)] space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="material-symbols-filled text-amber-400 text-[22px]">
-                  workspace_premium
-                </span>
+                <Award className="w-5 h-5 text-amber-400 shrink-0" />
                 <div>
                   <h3 className="text-xs sm:text-sm font-black text-white">
                     باقات واشتراكات القنوات الخاصة (Sami VIP والرحلة)
@@ -915,7 +964,7 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
                   </p>
                 </div>
               </div>
-              <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-amber-400 text-slate-950">
+              <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 shrink-0">
                 5 باقات معتمدة
               </span>
             </div>
@@ -931,7 +980,7 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
                     className="p-3 rounded-2xl bg-[#090f1d]/90 hover:bg-[#0e162a] border border-amber-500/20 hover:border-amber-400/50 transition cursor-pointer flex items-center justify-between gap-2.5 group"
                   >
                     {sub.imageUrl && (
-                      <img
+                      <CloudImage
                         src={sub.imageUrl}
                         alt={sub.name}
                         className="w-10 h-10 rounded-xl object-cover border border-amber-400/40 shrink-0"
@@ -989,15 +1038,13 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
         {/* Section Title: القنوات */}
         <div className="relative z-10 flex items-center justify-between pt-1 px-1">
           <div className="flex items-center gap-2.5">
-            <span className="material-symbols-filled text-[28px] text-amber-400 drop-shadow-[0_0_10px_rgba(251,191,36,0.55)]">
-              groups
-            </span>
+            <Users className="w-7 h-7 text-amber-400 drop-shadow-[0_0_10px_rgba(251,191,36,0.55)] shrink-0" />
             <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">
               القنوات
             </h2>
           </div>
           <span className="text-[11px] font-bold text-amber-400/90 bg-amber-500/10 border border-amber-500/25 px-2.5 py-1 rounded-full">
-            {visibleChannels.length} قناة
+            {channelsLoading && visibleChannels.length === 0 ? 'جاري التحميل...' : `${visibleChannels.length} قناة`}
           </span>
         </div>
 
@@ -1018,22 +1065,37 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
                   onClick={() => setSearchQuery('')}
                   className="text-slate-400 hover:text-amber-400 transition cursor-pointer flex items-center"
                 >
-                  <span className="material-symbols-rounded text-[18px]">close</span>
+                  <X className="w-4 h-4" />
                 </button>
               )}
-              <span className="material-symbols-rounded text-[20px] text-slate-400">
-                search
-              </span>
+              <Search className="w-5 h-5 text-slate-400" />
             </div>
           </div>
         </div>
 
         {/* Luxury Channels Cards List */}
-        {visibleChannels.length === 0 ? (
+        {channelsLoading && visibleChannels.length === 0 ? (
+          <div className="relative z-10 space-y-3">
+            {[1, 2, 3].map((k) => (
+              <div
+                key={k}
+                className="luxury-channel-card rounded-3xl p-3.5 sm:p-4 flex items-center justify-between animate-pulse"
+              >
+                <div className="flex items-center gap-3.5 flex-1 min-w-0">
+                  <div className="w-16 h-16 rounded-full bg-slate-800/90 border border-amber-500/30 shrink-0" />
+                  <div className="space-y-2 flex-1 min-w-0">
+                    <div className="h-4 bg-slate-700/60 rounded-md w-1/2" />
+                    <div className="h-3 bg-slate-800/60 rounded-md w-1/3" />
+                    <div className="h-4 bg-emerald-950/40 border border-emerald-500/20 rounded-full w-16" />
+                  </div>
+                </div>
+                <div className="w-8 h-8 rounded-full bg-slate-800/60 shrink-0" />
+              </div>
+            ))}
+          </div>
+        ) : visibleChannels.length === 0 ? (
           <div className="relative z-10 luxury-channel-card rounded-3xl p-8 text-center space-y-2">
-            <span className="material-symbols-filled text-amber-400 text-[34px]">
-              lock
-            </span>
+            <Lock className="w-9 h-9 text-amber-400 mx-auto" />
             <p className="text-sm font-bold text-slate-200">
               {searchQuery.trim()
                 ? 'لا توجد قنوات مطابقة لبحثك'
@@ -1082,9 +1144,7 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
                           style={{ backgroundImage: "url('/background_image.jpg')" }}
                         >
                           <div className="absolute inset-0 bg-slate-950/45" />
-                          <span className="relative z-10 material-symbols-filled text-amber-400 text-[26px] drop-shadow-[0_2px_6px_rgba(0,0,0,0.9)]">
-                            candlestick_chart
-                          </span>
+                          <TrendingUp className="relative z-10 w-7 h-7 text-amber-400 drop-shadow-[0_2px_6px_rgba(0,0,0,0.9)]" />
                         </div>
                       )}
                     </div>
@@ -1096,9 +1156,7 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
                       </h3>
 
                       <div className="flex items-center gap-1.5 text-xs text-slate-300 font-semibold">
-                        <span className="material-symbols-rounded text-[16px] text-slate-400">
-                          groups
-                        </span>
+                        <Users className="w-4 h-4 text-slate-400 shrink-0" />
                         <span>{ch.memberIds.length} عضو</span>
                       </div>
 
@@ -1120,18 +1178,16 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
                   {/* Left Side (RTL): Golden Lock Icon + Entry Chevron */}
                   <div className="relative z-10 flex items-center gap-2 shrink-0 mr-2">
                     <span
-                      className="material-symbols-filled text-[22px] text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.45)]"
                       title={
                         isVerified
                           ? 'تم التحقق من كلمة المرور'
                           : 'محمية بكلمة مرور القناة'
                       }
+                      className="inline-flex"
                     >
-                      lock
+                      <Lock className="w-5 h-5 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.45)] shrink-0" />
                     </span>
-                    <span className="material-symbols-rounded text-[22px] text-slate-400 group-hover:text-amber-300 group-hover:-translate-x-0.5 transition-all">
-                      chevron_left
-                    </span>
+                    <ChevronLeft className="w-5 h-5 text-slate-400 group-hover:text-amber-300 group-hover:-translate-x-0.5 transition-all shrink-0" />
                   </div>
                 </div>
               );
@@ -1155,9 +1211,7 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
 
           <div className="relative z-10 flex items-center gap-3.5">
             <div className="w-12 h-12 rounded-full bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500 text-slate-950 flex items-center justify-center shadow-[0_0_18px_rgba(251,191,36,0.55)] shrink-0">
-              <span className="material-symbols-filled text-[24px] text-slate-950">
-                chat
-              </span>
+              <MessageSquare className="w-6 h-6 text-slate-950" />
             </div>
             <div>
               <h3 className="text-base font-black text-white group-hover:text-amber-200 transition-colors">
@@ -1170,9 +1224,7 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
           </div>
 
           <div className="relative z-10 w-10 h-10 rounded-full bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500 text-slate-950 flex items-center justify-center shadow-[0_0_14px_rgba(251,191,36,0.5)] group-hover:scale-105 transition-transform shrink-0">
-            <span className="material-symbols-rounded text-[22px] font-bold text-slate-950">
-              chevron_left
-            </span>
+            <ChevronLeft className="w-5 h-5 font-bold text-slate-950" />
           </div>
         </div>
 
@@ -1185,7 +1237,7 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
             >
               <div className="flex items-center gap-3.5">
                 <div className="w-12 h-12 rounded-2xl bg-amber-400/15 border border-amber-400/40 flex items-center justify-center text-amber-400 shadow-[0_0_15px_rgba(245,158,11,0.25)] shrink-0">
-                  <span className="material-symbols-filled text-[24px]">lock</span>
+                  <Lock className="w-6 h-6 text-amber-400" />
                 </div>
                 <div>
                   <h3 className="text-base font-black text-white">
@@ -1199,9 +1251,7 @@ export const GroupChatScreen: React.FC<GroupChatScreenProps> = ({
 
               {passwordError && (
                 <div className="p-3 rounded-2xl bg-rose-500/20 border border-rose-500/45 text-rose-200 text-xs font-bold flex items-center gap-2">
-                  <span className="material-symbols-filled text-[18px] text-rose-400 shrink-0">
-                    error
-                  </span>
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
                   <span>{passwordError}</span>
                 </div>
               )}

@@ -32,6 +32,7 @@ import {
   AppUpdateConfig,
 } from './services/appUpdates';
 import { Bell, X } from 'lucide-react';
+import { LocalCacheService } from './services/localCache';
 import {
   getSavedUserSession,
   saveUserSession,
@@ -136,6 +137,16 @@ export default function App() {
     window.addEventListener('app_open_chat_message', handleBrowserNotifClick);
     return () => window.removeEventListener('app_open_chat_message', handleBrowserNotifClick);
   }, []);
+
+  // Sync existing user session with Android native bridge
+  useEffect(() => {
+    if (currentUser && typeof window !== 'undefined') {
+      const bridge = (window as unknown as { SamiAndroidBridge?: { onUserLoggedIn: (id: number, name: string) => void } }).SamiAndroidBridge;
+      if (bridge?.onUserLoggedIn) {
+        bridge.onUserLoggedIn(currentUser.id, currentUser.displayName);
+      }
+    }
+  }, [currentUser]);
 
   // App Update Modal State
   const [appUpdateConfig, setAppUpdateConfig] = useState<AppUpdateConfig | null>(null);
@@ -422,9 +433,27 @@ export default function App() {
     setCurrentUser(user);
     setActiveTab('dashboard');
     refreshData();
+
+    // Notify Android Native bridge for FCM Token syncing to this user
+    if (typeof window !== 'undefined') {
+      const bridge = (window as unknown as { SamiAndroidBridge?: { onUserLoggedIn: (id: number, name: string) => void } }).SamiAndroidBridge;
+      if (bridge?.onUserLoggedIn) {
+        bridge.onUserLoggedIn(user.id, user.displayName);
+      }
+    }
   };
 
   const handleLogout = () => {
+    if (currentUser) {
+      LocalCacheService.clearUserSensitiveCache(currentUser.id);
+    }
+    // Notify Android Native bridge of logout
+    if (typeof window !== 'undefined') {
+      const bridge = (window as unknown as { SamiAndroidBridge?: { onUserLoggedOut: () => void } }).SamiAndroidBridge;
+      if (bridge?.onUserLoggedOut) {
+        bridge.onUserLoggedOut();
+      }
+    }
     logoutUser();
     StorageService.setCurrentUser(null);
     setSelectedTrade(null);
