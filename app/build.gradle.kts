@@ -12,8 +12,8 @@ android {
         applicationId = "com.sami.tradingchallengetracker"
         minSdk = 24
         targetSdk = 34
-        versionCode = 11
-        versionName = "1.3.0"
+        versionCode = 12
+        versionName = "1.3.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -35,13 +35,27 @@ android {
 
     signingConfigs {
         create("samiUniversal") {
-            val keystoreFile = file("sami-signing-key.p12")
-            if (keystoreFile.exists()) {
-                storeFile = keystoreFile
-                storeType = "PKCS12"
-                storePassword = "samitrading"
-                keyAlias = "sami"
-                keyPassword = "samitrading"
+            // Check for persistent keystore in priority order:
+            // 1. Environment variable path
+            // 2. Local app directory sami-release.jks
+            // 3. Legacy sami-signing-key.p12
+            val customKeystorePath = System.getenv("SIGNING_KEYSTORE_PATH")
+            val p12Keystore = file("sami-signing-key.p12")
+            val jksKeystore = file("sami-release.jks")
+            
+            val activeKeystore = when {
+                !customKeystorePath.isNullOrEmpty() && file(customKeystorePath).exists() -> file(customKeystorePath)
+                jksKeystore.exists() -> jksKeystore
+                p12Keystore.exists() -> p12Keystore
+                else -> null
+            }
+
+            if (activeKeystore != null) {
+                storeFile = activeKeystore
+                storeType = if (activeKeystore.name.endsWith(".p12")) "PKCS12" else "JKS"
+                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "samitrading"
+                keyAlias = System.getenv("KEY_ALIAS") ?: "sami"
+                keyPassword = System.getenv("KEY_PASSWORD") ?: "samitrading"
                 enableV1Signing = true
                 enableV2Signing = true
                 enableV3Signing = true
@@ -52,17 +66,17 @@ android {
 
     buildTypes {
         debug {
-            val keystoreFile = file("sami-signing-key.p12")
-            if (keystoreFile.exists()) {
-                signingConfig = signingConfigs.getByName("samiUniversal")
+            val samiConfig = signingConfigs.findByName("samiUniversal")
+            if (samiConfig?.storeFile != null && samiConfig.storeFile!!.exists()) {
+                signingConfig = samiConfig
             }
         }
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            val keystoreFile = file("sami-signing-key.p12")
-            if (keystoreFile.exists()) {
-                signingConfig = signingConfigs.getByName("samiUniversal")
+            val samiConfig = signingConfigs.findByName("samiUniversal")
+            if (samiConfig?.storeFile != null && samiConfig.storeFile!!.exists()) {
+                signingConfig = samiConfig
             } else {
                 signingConfig = signingConfigs.getByName("debug")
             }
@@ -124,13 +138,13 @@ dependencies {
     implementation("androidx.room:room-ktx:$roomVersion")
     ksp("androidx.room:room-compiler:$roomVersion")
 
-    // Firebase Firestore & Firebase Storage for real-time cloud chat and image storage
+    // Firebase
     implementation(platform("com.google.firebase:firebase-bom:33.1.2"))
     implementation("com.google.firebase:firebase-firestore-ktx")
     implementation("com.google.firebase:firebase-storage-ktx")
     implementation("com.google.firebase:firebase-messaging-ktx")
 
-    // Coil for Compose image loading
+    // Coil
     implementation("io.coil-kt:coil-compose:2.6.0")
 
     // Media3 ExoPlayer
@@ -142,6 +156,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
 
-    // AndroidX WebKit for offline local HTML/JS/CSS asset loading and PWA support
+    // AndroidX WebKit for offline HTML/JS/CSS assets
     implementation("androidx.webkit:webkit:1.11.0")
 }
