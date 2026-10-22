@@ -3,15 +3,12 @@ name: Build Sami Android APK
 on:
   push:
     branches:
-      - main
-      - master
       - '**'
     tags:
-      - 'v*'
+      - '**'
   pull_request:
     branches:
-      - main
-      - master
+      - '**'
   workflow_dispatch:
     inputs:
       create_release:
@@ -46,6 +43,7 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
 
       - name: 3. Install Web dependencies
         run: |
@@ -83,7 +81,15 @@ jobs:
       - name: 6. Set up Android SDK & Accept Licenses
         run: |
           echo "Accepting Android SDK licenses..."
-          yes | sdkmanager --licenses 2>/dev/null || true
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          if command -v sdkmanager >/dev/null 2>&1; then
+            yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          fi
+          mkdir -p "$ANDROID_HOME/licenses" 2>/dev/null || true
+          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" >> "$ANDROID_HOME/licenses/android-sdk-license" 2>/dev/null || true
+          echo "d56f5187479451eabf01fb78af6dfcb131a6481e" >> "$ANDROID_HOME/licenses/android-sdk-license" 2>/dev/null || true
+          echo "84831b9409646a3e15e5a53882e901a47d48d740" >> "$ANDROID_HOME/licenses/android-sdk-preview-license" 2>/dev/null || true
+          echo "Android SDK licenses accepted successfully."
 
       - name: 7. Prepare Gradle wrapper
         run: |
@@ -113,7 +119,7 @@ jobs:
 
       - name: 9. Build Universal Signed Release APK with Gradle
         env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=\"-Xmx4096m -XX:MaxMetaspaceSize=1024m -XX:+HeapDumpOnOutOfMemoryError\""
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=\"-Xmx2560m -XX:MaxMetaspaceSize=768m -XX:+HeapDumpOnOutOfMemoryError\""
         run: |
           echo "Building single Universal Release APK..."
           ./gradlew assembleRelease --no-daemon --stacktrace
@@ -122,10 +128,13 @@ jobs:
         run: |
           mkdir -p build_output_apk
 
-          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" 2>/dev/null | head -n 1)
+          if [ -z "$RELEASE_APK" ] || [ ! -f "$RELEASE_APK" ]; then
+            RELEASE_APK=$(find app/build/outputs/apk -name "*.apk" 2>/dev/null | head -n 1)
+          fi
 
           if [ -z "$RELEASE_APK" ] || [ ! -f "$RELEASE_APK" ]; then
-            echo "::error::Release APK was not generated in app/build/outputs/apk/release/!"
+            echo "::error::Release APK was not generated in app/build/outputs/apk/!"
             exit 1
           fi
 
@@ -189,12 +198,12 @@ jobs:
           overwrite: true
 
       - name: 12. Publish GitHub Release (Direct APK Download)
-        if: (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true') || startsWith(github.ref, 'refs/tags/')
+        if: (github.event_name == 'workflow_dispatch' && (inputs.create_release == true || inputs.create_release == 'true')) || startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         continue-on-error: true
         with:
-          tag_name: ${{ github.event.inputs.release_tag || github.ref_name || 'v1.3.0' }}
-          name: Sami Android App ${{ github.event.inputs.release_tag || github.ref_name || 'v1.3.0' }}
+          tag_name: ${{ inputs.release_tag || github.ref_name || 'v1.3.0' }}
+          name: Sami Android App ${{ inputs.release_tag || github.ref_name || 'v1.3.0' }}
           files: build_output_apk/Sami-Android.apk
           draft: false
           prerelease: false
